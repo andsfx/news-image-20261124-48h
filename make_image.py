@@ -80,6 +80,12 @@ def draw_icon(draw, cx, cy, kind, color):
                         cy + int(radius * __import__("math").sin(angle))))
         draw.polygon(pts, fill=color)
         draw.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=BG)
+    elif kind == "return":
+        draw.rectangle([cx - 20, cy - 2, cx + 4, cy + 20], outline=color, width=4)
+        draw.line([(cx - 24, cy - 2), (cx - 8, cy - 18)], fill=color, width=4)
+        draw.line([(cx - 8, cy - 18), (cx + 8, cy - 2)], fill=color, width=4)
+        draw.line([(cx + 28, cy + 6), (cx + 10, cy + 6)], fill=color, width=4)
+        draw.polygon([(cx + 18, cy - 2), (cx + 8, cy + 6), (cx + 18, cy + 14)], fill=color)
     elif kind == "deal":
         draw.ellipse([cx - 28, cy - 20, cx + 6, cy + 16], outline=color, width=4)
         draw.ellipse([cx - 6, cy - 20, cx + 28, cy + 16], outline=color, width=4)
@@ -88,7 +94,7 @@ def draw_icon(draw, cx, cy, kind, color):
 
 
 PANELS = [
-    ("UNITED STATES", "US TARIFF PLAN: 16 PARTNERS", (255, 183, 77), "tariff"),
+    ("BANGLADESH", "HASINA PLANS RETURN FROM EXILE", (255, 183, 77), "return"),
     ("UKRAINE", "ZAPORIZHZHIA: 2 DEAD, 40 HURT", (255, 99, 112), "strike"),
     ("MIDDLE EAST", "HAMAS SECURITY CHIEF KILLED", (255, 138, 92), "target"),
     ("SENEGAL", "175 MIGRANTS LOST OFF SENEGAL", (91, 200, 255), "boat"),
