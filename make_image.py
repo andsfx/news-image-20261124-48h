@@ -1,161 +1,316 @@
 #!/usr/bin/env python3
-"""Build the deterministic 1024x1024 world-news infographic for 24 Nov 2026."""
+"""Draw the 24 November 2026 editorial front page as a fixed 1024x1024 PNG.
 
+Every visual decision is seeded, so the file is byte-for-byte reproducible.
+No network, no external font download, no clock, no unseeded randomness.
+"""
+
+from __future__ import annotations
+
+import math
+import random
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-SIZE = 1024
-BG = (9, 14, 28)
-PANEL = (19, 28, 51)
-BORDER = (48, 68, 108)
-WHITE = (242, 247, 255)
-CYAN = (86, 224, 236)
-MUTED = (150, 172, 210)
+WIDTH = 1024
+HEIGHT = 1024
+SEED = 20261124
 
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+BOLD_FILE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+REGULAR_FILE = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+PAPER = (244, 239, 228)
+INK = (18, 20, 26)
+MUTED = (86, 82, 74)
+CREAM = (255, 250, 238)
+GRAIN_AMPLITUDE = 1
+GRAIN_BLOCK = 2
+
+MASTHEAD_END = 155
+SCENE_END = 580
+BAND_END = 710
+STRIP_TOP = 715
+STRIP_HEIGHT = 103
+
+ACRONYM = "GLOBAL DAILY BRIEF  •  4 CONTINENTS  •  EVERY STORY FROM THIS DAY"
+DATE_TEXT = "24 NOVEMBER 2026"
+HERO_LINES = ("SENEGAL: 175 MIGRANTS", "MISSING AT SEA")
+HERO_LABEL = "AFRICA  •  YOFF, DAKAR  •  REUTERS"
+
+STRIPS = (
+    {
+        "top": STRIP_TOP,
+        "base": (108, 26, 30),
+        "accent": (232, 106, 86),
+        "lines": ("GAZA: HAMAS CHIEF", "ABU NAHEL KILLED"),
+        "label": "MIDDLE EAST",
+    },
+    {
+        "top": STRIP_TOP + STRIP_HEIGHT,
+        "base": (18, 42, 78),
+        "accent": (112, 172, 226),
+        "lines": ("BANGLADESH: HASINA SETS", "DEC 16 RETURN"),
+        "label": "ASIA",
+    },
+    {
+        "top": STRIP_TOP + 2 * STRIP_HEIGHT,
+        "base": (24, 72, 54),
+        "accent": (232, 188, 84),
+        "lines": ("US / FRANCE: SANOFI TO", "BUY INSMED ($41B)"),
+        "label": "AMERICAS / EUROPE",
+    },
+)
 
 
-def font(size: int, bold: bool = True):
-    path = FONT_BOLD if bold else FONT_REGULAR
+def font_at(path: str, size: int) -> ImageFont.FreeTypeFont:
+    """Load a DejaVu face, falling back to the bundled bitmap font."""
     try:
         return ImageFont.truetype(path, size)
     except OSError:
-        return ImageFont.load_default(size=size)
+        return ImageFont.load_default()
 
 
-def wrap(draw, text, fnt, max_width):
-    lines, current = [], ""
-    for word in text.split():
-        trial = word if not current else current + " " + word
-        if draw.textlength(trial, font=fnt) <= max_width or not current:
-            current = trial
-        else:
-            lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines
+def width_of(face: ImageFont.FreeTypeFont, text: str) -> int:
+    """Measure text width without relying on a bitmap font's anchor support."""
+    try:
+        box = face.getbbox(text, anchor="lt")
+        return max(1, box[2] - box[0])
+    except (TypeError, ValueError):
+        box = face.getbbox(text)
+        return max(1, box[2] - box[0])
 
 
-def draw_icon(draw, cx, cy, kind, color):
-    if kind == "tariff":
-        draw.rectangle([cx - 20, cy - 4, cx + 20, cy + 18], outline=color, width=4)
-        for dx in (-10, 0, 10):
-            draw.line([(cx + dx, cy), (cx + dx, cy + 17)], fill=color, width=3)
-        draw.polygon([(cx - 14, cy - 10), (cx, cy - 28), (cx + 14, cy - 10)], fill=color)
-    elif kind == "strike":
-        draw.rectangle([cx - 22, cy - 2, cx + 4, cy + 22], outline=color, width=4)
-        draw.line([(cx - 22, cy + 8), (cx + 4, cy + 8)], fill=color, width=3)
-        draw.polygon(
-            [(cx + 14, cy - 30), (cx + 20, cy - 14), (cx + 36, cy - 12),
-             (cx + 22, cy), (cx + 26, cy + 16), (cx + 12, cy + 8),
-             (cx - 2, cy + 16), (cx + 2, cy - 2), (cx - 10, cy - 12),
-             (cx + 6, cy - 14)],
-            fill=color,
+def fitted_face(
+    lines: tuple[str, ...] | list[str], max_width: int, start: int, floor: int
+) -> ImageFont.FreeTypeFont:
+    """Shrink from start until every line fits, never below floor."""
+    for size in range(start, floor - 1, -1):
+        face = font_at(BOLD_FILE, size)
+        if all(width_of(face, line) <= max_width for line in lines):
+            return face
+    return font_at(BOLD_FILE, floor)
+
+
+def put(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, face, fill) -> None:
+    """Draw with a top-left anchor, with a safe fallback for the bitmap font."""
+    try:
+        draw.text(xy, text, font=face, fill=fill, anchor="lt")
+    except (TypeError, ValueError):
+        draw.text(xy, text, font=face, fill=fill)
+
+
+def vertical_gradient(draw: ImageDraw.ImageDraw, top: int, bottom: int, a, b) -> None:
+    """Fill a horizontal band with a two-stop linear gradient."""
+    span = max(1, bottom - top - 1)
+    for y in range(top, bottom):
+        t = (y - top) / span
+        colour = tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+        draw.line([(0, y), (WIDTH, y)], fill=colour)
+
+
+def draw_masthead(draw: ImageDraw.ImageDraw) -> None:
+    """Paper-white header with double rules and the date-dominant lockup."""
+    draw.rectangle((0, 0, WIDTH, MASTHEAD_END), fill=PAPER)
+    draw.line([(32, 10), (992, 10)], fill=INK, width=3)
+    draw.line([(32, 15), (992, 15)], fill=INK, width=1)
+
+    accent = font_at(REGULAR_FILE, 22)
+    put(draw, ((WIDTH - width_of(accent, ACRONYM)) // 2, 22), ACRONYM, accent, MUTED)
+
+    date_face = fitted_face((DATE_TEXT,), WIDTH - 64, 96, 80)
+    put(draw, ((WIDTH - width_of(date_face, DATE_TEXT)) // 2, 52), DATE_TEXT, date_face, INK)
+
+    draw.line([(32, 128), (992, 128)], fill=INK, width=1)
+    draw.line([(32, 133), (992, 133)], fill=INK, width=3)
+
+
+def draw_sky_and_sea(img: Image.Image, rng: random.Random) -> None:
+    """Dusk horizon, sun glow, water gradient, and deterministic wave strokes."""
+    draw = ImageDraw.Draw(img)
+    horizon = 372
+    vertical_gradient(draw, MASTHEAD_END, horizon, (24, 26, 54), (198, 104, 76))
+    vertical_gradient(draw, horizon, SCENE_END, (126, 74, 86), (10, 20, 42))
+    draw.line([(0, horizon), (WIDTH, horizon)], fill=(236, 176, 126), width=2)
+
+    glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    g = ImageDraw.Draw(glow)
+    for radius in range(150, 18, -6):
+        alpha = round(3 + (150 - radius) * 0.32)
+        g.ellipse(
+            (770 - radius, horizon - radius, 770 + radius, horizon + radius),
+            fill=(255, 186, 118, alpha),
         )
-    elif kind == "target":
-        draw.ellipse([cx - 26, cy - 26, cx + 26, cy + 26], outline=color, width=4)
-        draw.ellipse([cx - 13, cy - 13, cx + 13, cy + 13], outline=color, width=4)
-        draw.line([(cx - 32, cy), (cx - 18, cy)], fill=color, width=4)
-        draw.line([(cx + 18, cy), (cx + 32, cy)], fill=color, width=4)
-        draw.line([(cx, cy - 32), (cx, cy - 18)], fill=color, width=4)
-        draw.line([(cx, cy + 18), (cx, cy + 32)], fill=color, width=4)
-        draw.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=color)
-    elif kind == "boat":
-        draw.polygon([(cx - 28, cy + 2), (cx + 28, cy + 2),
-                      (cx + 18, cy + 22), (cx - 18, cy + 22)], outline=color, width=4)
-        draw.line([(cx, cy - 28), (cx, cy + 2)], fill=color, width=4)
-        draw.polygon([(cx + 2, cy - 26), (cx + 24, cy - 6), (cx + 2, cy - 6)], fill=color)
-        for off in (-8, 8):
-            draw.arc([cx - 30, cy + 22 + off, cx + 30, cy + 38 + off],
-                     200, 340, fill=color, width=3)
-    elif kind == "blast":
-        pts = []
-        for i in range(16):
-            angle = i * 3.141592653589793 / 8
-            radius = 29 if i % 2 == 0 else 13
-            pts.append((cx + int(radius * __import__("math").cos(angle)),
-                        cy + int(radius * __import__("math").sin(angle))))
-        draw.polygon(pts, fill=color)
-        draw.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=BG)
-    elif kind == "return":
-        draw.rectangle([cx - 20, cy - 2, cx + 4, cy + 20], outline=color, width=4)
-        draw.line([(cx - 24, cy - 2), (cx - 8, cy - 18)], fill=color, width=4)
-        draw.line([(cx - 8, cy - 18), (cx + 8, cy - 2)], fill=color, width=4)
-        draw.line([(cx + 28, cy + 6), (cx + 10, cy + 6)], fill=color, width=4)
-        draw.polygon([(cx + 18, cy - 2), (cx + 8, cy + 6), (cx + 18, cy + 14)], fill=color)
-    elif kind == "deal":
-        draw.ellipse([cx - 28, cy - 20, cx + 6, cy + 16], outline=color, width=4)
-        draw.ellipse([cx - 6, cy - 20, cx + 28, cy + 16], outline=color, width=4)
-        draw.rectangle([cx - 12, cy - 3, cx + 12, cy + 21], fill=color)
-        draw.line([(cx - 6, cy + 9), (cx + 6, cy + 9)], fill=BG, width=3)
+    g.ellipse((746, horizon - 26, 794, horizon + 22), fill=(255, 226, 168, 220))
+    img.alpha_composite(glow)
+
+    for _ in range(190):
+        y = rng.randint(horizon + 4, SCENE_END - 4)
+        x = rng.randint(0, WIDTH - 90)
+        length = rng.randint(18, 92)
+        depth = (y - horizon) / (SCENE_END - horizon)
+        shade = round(150 - depth * 96)
+        colour = (shade, round(shade * 0.72), round(shade * 0.70))
+        draw.line([(x, y), (x + length, y)], fill=colour, width=1)
 
 
-PANELS = [
-    ("BANGLADESH", "HASINA PLANS RETURN FROM EXILE", (255, 183, 77), "return"),
-    ("UKRAINE", "ZAPORIZHZHIA: 2 DEAD, 40 HURT", (255, 99, 112), "strike"),
-    ("MIDDLE EAST", "HAMAS SECURITY CHIEF KILLED", (255, 138, 92), "target"),
-    ("SENEGAL", "175 MIGRANTS LOST OFF SENEGAL", (91, 200, 255), "boat"),
-    ("VIETNAM", "HANOI BLAST: 6 DEAD, 10 HURT", (255, 170, 64), "blast"),
-    ("BUSINESS", "SANOFI BUYS INSMED: $41B", (110, 231, 165), "deal"),
-]
+def draw_route_and_land(draw: ImageDraw.ImageDraw) -> None:
+    """Africa shadow at the horizon and a dashed Dakar to Europe route."""
+    horizon = 372
+    land = (
+        (0, horizon),
+        (0, 336),
+        (44, 340),
+        (78, 328),
+        (118, 338),
+        (158, 352),
+        (196, 360),
+        (214, horizon),
+    )
+    draw.polygon(land, fill=(20, 22, 42))
+
+    def bezier(t: float) -> tuple[int, int]:
+        u = 1.0 - t
+        x = u * u * 62 + 2 * u * t * 520 + t * t * 946
+        y = u * u * 366 + 2 * u * t * 158 + t * t * 246
+        return round(x), round(y)
+
+    for step in range(64):
+        t0 = step / 64
+        t1 = min(1.0, t0 + 0.009)
+        draw.line([bezier(t0), bezier(t1)], fill=(248, 214, 164), width=2)
+
+    small = font_at(REGULAR_FILE, 16)
+    put(draw, (24, 306), "DAKAR", small, (240, 214, 170))
+    put(draw, (872, 216), "EUROPE", small, (240, 214, 170))
 
 
-def main():
-    img = Image.new("RGB", (SIZE, SIZE), BG)
-    d = ImageDraw.Draw(img)
+def draw_number_and_dots(img: Image.Image, rng: random.Random) -> None:
+    """Translucent 175 plus exactly 175 seeded dots marking the missing boat."""
+    layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    big = font_at(BOLD_FILE, 300)
+    text = "175"
+    nx = (WIDTH - width_of(big, text)) // 2 + 90
+    put(d, (nx, 232), text, big, (255, 238, 204, 46))
 
-    d.rectangle([0, 0, SIZE, 14], fill=CYAN)
-    title = font(84)
-    d.text((SIZE // 2, 42), "24 NOVEMBER 2026", font=title,
-           fill=WHITE, anchor="ma")
-    sub = font(30, bold=False)
-    sub_text = "W O R L D   N E W S   I N   O N E   I M A G E"
-    d.text((SIZE // 2, 158), sub_text, font=sub, fill=CYAN, anchor="ma")
-    d.line([(28, 202), (SIZE - 28, 202)], fill=BORDER, width=3)
+    for index in range(175):
+        t = index / 174
+        bx = 428 + 470 * t
+        by = 500 - 112 * t + 16 * math.sin(t * 9.0)
+        x = round(bx + rng.randint(-27, 27))
+        y = round(by + rng.randint(-11, 11))
+        r = rng.choice((1, 1, 1, 2))
+        d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 222, 174, rng.randint(120, 220)))
+    img.alpha_composite(layer)
 
-    margin, gap = 26, 16
-    panel_w = (SIZE - 2 * margin - gap) // 2
-    panel_h, gap_y, top = 250, 14, 218
-    label_font = font(34)
-    region_font = font(28)
-    index_font = font(26)
 
-    for i, (region, label, accent, icon) in enumerate(PANELS):
-        col, row = i % 2, i // 2
-        x = margin + col * (panel_w + gap)
-        y = top + row * (panel_h + gap_y)
+def draw_boat(draw: ImageDraw.ImageDraw) -> None:
+    """Wooden hull with passenger silhouettes and a long reflection."""
+    hull = ((186, 488), (476, 488), (442, 526), (222, 526))
+    draw.polygon(hull, fill=(14, 11, 15))
+    draw.line([(196, 496), (466, 496)], fill=(104, 66, 48), width=2)
+    for offset in (0, 9, 18):
+        draw.line([(222 + offset, 508), (448 - offset, 508)], fill=(58, 38, 32), width=1)
+    for i in range(11):
+        cx = 226 + i * 22
+        top = 462 + (i % 3) * 4
+        draw.ellipse((cx - 7, top, cx + 7, top + 14), fill=(10, 9, 12))
+        draw.rectangle((cx - 10, top + 12, cx + 10, top + 28), fill=(10, 9, 12))
+    draw.line([(300, 462), (520, 548)], fill=(36, 24, 22), width=3)
+    for k in range(6):
+        y = 532 + k * 8
+        draw.line([(236 + k * 3, y), (438 - k * 3, y)], fill=(58, 44, 52), width=1)
 
-        d.rounded_rectangle([x, y, x + panel_w, y + panel_h], radius=18,
-                            fill=PANEL, outline=BORDER, width=3)
-        d.rounded_rectangle([x + 5, y + 20, x + 11, y + panel_h - 20],
-                            radius=3, fill=accent)
 
-        cx, cy, r = x + 66, y + 66, 36
-        dark = tuple(max(0, int(c * 0.20)) for c in accent)
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=dark, outline=accent, width=3)
-        draw_icon(d, cx, cy, icon, accent)
+def draw_headline_band(draw: ImageDraw.ImageDraw) -> None:
+    """Soft shadow above a dark band carrying the hero headline and label."""
+    for k in range(8):
+        t = k / 7
+        colour = tuple(
+            round((10, 20, 42)[i] + ((14, 17, 26)[i] - (10, 20, 42)[i]) * t)
+            for i in range(3)
+        )
+        draw.line([(0, 572 + k), (WIDTH, 572 + k)], fill=colour, width=1)
+    draw.rectangle((0, SCENE_END, WIDTH, BAND_END), fill=(14, 17, 26))
 
-        d.text((x + panel_w - 24, y + 30), region, font=region_font,
-               fill=accent, anchor="ra")
+    face = fitted_face(HERO_LINES, WIDTH - 64, 56, 48)
+    put(draw, (32, 586), HERO_LINES[0], face, CREAM)
+    put(draw, (32, 632), HERO_LINES[1], face, CREAM)
 
-        lines = wrap(d, label, label_font, panel_w - 60)
-        assert len(lines) <= 2, f"label needs more than two lines: {label}"
-        ly = y + 120
-        for line in lines:
-            d.text((x + 28, ly), line, font=label_font, fill=WHITE, anchor="la")
-            ly += 44
+    label = font_at(REGULAR_FILE, 20)
+    put(draw, (32, 684), HERO_LABEL, label, (226, 198, 156))
 
-        d.line([(x + 28, y + panel_h - 22), (x + panel_w - 28, y + panel_h - 22)],
-               fill=BORDER, width=2)
-        d.text((x + panel_w - 24, y + panel_h - 40),
-               f"{i + 1:02d} / 06", font=index_font, fill=MUTED, anchor="ra")
 
-    path = Path(__file__).resolve().parent / "entry.png"
-    img.save(path, format="PNG", optimize=False, compress_level=9)
-    print(f"wrote {path.name}")
+def draw_strips(draw: ImageDraw.ImageDraw) -> None:
+    """Three continental colour-coded strips with large two-line headlines."""
+    for strip in STRIPS:
+        top = strip["top"]
+        bottom = top + STRIP_HEIGHT
+        draw.rectangle((0, top, WIDTH, bottom), fill=strip["base"])
+        draw.rectangle((0, top, 14, bottom), fill=strip["accent"])
+        draw.line([(16, top), (16, bottom)], fill=(255, 255, 255), width=1)
+
+        face = fitted_face(tuple(strip["lines"]), WIDTH - 64, 56, 44)
+        put(draw, (30, top + 6), strip["lines"][0], face, CREAM)
+        put(draw, (30, top + 54), strip["lines"][1], face, CREAM)
+
+        label = font_at(BOLD_FILE, 20)
+        put(draw, (WIDTH - 24 - width_of(label, strip["label"]), top + 62), strip["label"], label, strip["accent"])
+
+        if top > STRIP_TOP:
+            draw.line([(0, top), (WIDTH, top)], fill=(250, 244, 230), width=2)
+
+
+def add_grain(img: Image.Image, amplitude: int) -> None:
+    """Seeded block grain over paper, hero and strips; blocks keep the PNG small."""
+    rng = random.Random(SEED)
+    block = GRAIN_BLOCK
+    gw = (WIDTH + block - 1) // block
+    gh = (HEIGHT + block - 1) // block
+    noise = rng.randbytes(gw * gh * 3)
+    pixels = img.load()
+    span = 2 * amplitude + 1
+    index = 0
+    for by in range(0, HEIGHT, block):
+        for bx in range(0, WIDTH, block):
+            dr = noise[index] % span - amplitude
+            dg = noise[index + 1] % span - amplitude
+            db = noise[index + 2] % span - amplitude
+            index += 3
+            for yy in range(by, min(by + block, HEIGHT)):
+                for xx in range(bx, min(bx + block, WIDTH)):
+                    r, g, b = pixels[xx, yy]
+                    pixels[xx, yy] = (
+                        max(0, min(255, r + dr)),
+                        max(0, min(255, g + dg)),
+                        max(0, min(255, b + db)),
+                    )
+
+
+def build() -> Image.Image:
+    """Compose the full page from top to bottom, then add print grain."""
+    img = Image.new("RGBA", (WIDTH, HEIGHT), PAPER + (255,))
+    draw = ImageDraw.Draw(img)
+    rng = random.Random(SEED)
+
+    draw_masthead(draw)
+    draw_sky_and_sea(img, rng)
+    draw_route_and_land(draw)
+    draw_number_and_dots(img, rng)
+    draw_boat(draw)
+    draw_headline_band(draw)
+    draw_strips(draw)
+
+    rgb = img.convert("RGB")
+    add_grain(rgb, GRAIN_AMPLITUDE)
+    return rgb
+
+
+def main() -> None:
+    """Save the deterministic artwork next to this script."""
+    target = Path(__file__).resolve().parent / "entry.png"
+    build().save(target, format="PNG", optimize=True)
 
 
 if __name__ == "__main__":
